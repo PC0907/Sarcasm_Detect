@@ -85,7 +85,8 @@ def train():
         model.train()
         print('Epoch: {0:02}'.format(epoch + 1))
         total_epoch_loss = 0
-        total_epoch_acc = 0
+        total_correct = 0
+        total_samples = 0
         batch_train = utils.batch_iter(train_data, train_labels, config.batch_size)
 
         steps = 1
@@ -95,57 +96,113 @@ def train():
             
             optimizer.zero_grad()
             
-            # CRF returns loss directly
+            # Get loss
             loss = model(x_batch, y_batch)
             
-            # For accuracy calculation, get predictions
+            # Get predictions for accuracy
             with torch.no_grad():
-                predictions = model(x_batch)  # During inference mode
-                num_correct = (predictions == y_batch).sum()
-                acc = 100.0 * num_correct / len(x_batch)
+                predictions = model(x_batch)
+                total_correct += (predictions == y_batch).sum().item()
+                total_samples += len(y_batch)
             
             loss.backward()
             optimizer.step()
             
             if steps % 100 == 0:
                 print("batch:", steps)
+                current_acc = (total_correct / total_samples) * 100
                 print('Training Loss: {0:.4f}'.format(loss.item()), 
-                      'Training Accuracy: {0: .2f}%'.format(acc.item()))
+                      'Training Accuracy: {0:.2f}%'.format(current_acc))
             
             steps += 1
             total_epoch_loss += loss.item()
-            total_epoch_acc += acc.item()
 
-        if config.hit_patient >= config.early_stop_patient:
-            print("hit final patient-----------------------")
-            print("Early Stopping")
-            break
+        avg_epoch_loss = total_epoch_loss / steps
+        final_acc = (total_correct / total_samples) * 100
 
         print("\n")
         print('Epoch: {0:02}'.format(epoch + 1))
-        print('Train Loss: {0:.3f}'.format(total_epoch_loss / steps),
-              'Train Acc: {0:.3f}%'.format(total_epoch_acc / steps))
+        print('Train Loss: {0:.3f}'.format(avg_epoch_loss),
+              'Train Acc: {0:.3f}%'.format(final_acc))
         
-        saved = validation(total_epoch_loss / steps)
-        loss_train.append(total_epoch_loss / steps)
+        saved = validation(avg_epoch_loss)
+        loss_train.append(avg_epoch_loss)
         print("\n")
-
+        
 def test():
     test_data, test_label = utils.load_corpus(config.test_path, max_sen_len=config.max_sen_len)
     batch_test = utils.batch_iter(test_data, test_label, batch_size=len(test_label))
     y_true = []
     y_pred = []
-    model.load_state_dict(torch.load(config.model_save_path))
+    
+    try:
+        model.load_state_dict(torch.load(config.model_save_path))
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        return
+        
     model.eval()
 
-    for x_batch, y_batch in batch_test:
-        x_batch = x_batch.to(device)
-        y_batch = y_batch.to(device)
-        # CRF returns predictions directly in eval mode
-        predictions = model(x_batch)
-        y_true.extend(y_batch.tolist())
-        y_pred.extend(predictions.tolist())
+    with torch.no_grad():
+        for x_batch, y_batch in batch_test:
+            x_batch = x_batch.to(device)
+            y_batch = y_batch.to(device)
+            
+            predictions = model(x_batch)
+            
+            # Ensure predictions and labels are on CPU for numpy conversion
+            y_true.extend(y_batch.cpu().numpy().tolist())
+            y_pred.extend(predictions.cpu().numpy().tolist())
+    
+    # Add some basic checks
+    print(f"Number of test samples: {len(y_true)}")
+    print(f"Number of predictions: {len(y_pred)}")
+    print(f"Unique values in predictions: {set(y_pred)}")
+    print(f"Unique values in true labels: {set(y_true)}")
+    
     evaluate(y_pred, y_true)
+
+def validation(train_loss):
+    model.eval()
+    eval_data, eval_label = utils.load_corpus(config.test_path, max_sen_len=config.max_sen_len)
+    batch_eval = utils.batch_iter(eval_data, eval_label, batch_size=config.batch_size)
+    total_loss = 0
+    total_correct = 0
+    total_samples = 0
+    steps = 0
+    
+    with torch.no_grad():
+        for x_batch, y_batch in batch_eval:
+            x_batch = x_batch.to(device)
+            y_batch = y_batch.to(device)
+            
+            # Get loss
+            loss = model(x_batch, y_batch)
+            total_loss += loss.item()  # Now this should be a scalar
+            
+            # Get predictions for accuracy
+            predictions = model(x_batch)  # This will return predictions
+            total_correct += (predictions == y_batch).sum().item()
+            total_samples += len(y_batch)
+            steps += 1
+    
+    avg_loss = total_loss / steps
+    accuracy = (total_correct / total_samples) * 100
+    
+    print(f"Validation Loss: {avg_loss:.4f}")
+    print(f"Validation Accuracy: {accuracy:.2f}%")
+    
+    if avg_loss < config.best_loss:
+        config.best_loss = avg_loss
+        print("better model---------------------")
+        print("save model---------------------")
+        torch.save(model.state_dict(), config.model_save_path)
+        print("current best loss: {0:.6f}".format(avg_loss))
+        config.hit_patient = 0
+    else:
+        config.hit_patient += 1
+    
+    return True
 
 def recordLoss():
     f = open(config.train_loss_path, 'w')
